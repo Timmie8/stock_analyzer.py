@@ -3,82 +3,90 @@ import yfinance as yf
 import pandas_ta as ta
 import pandas as pd
 
-def get_signal(df):
-    # 1. Grondige data-check
-    if df is None or df.empty or len(df) < 21:
-        return "NO DATA"
+def get_gpt5_score(df):
+    if df is None or df.empty or len(df) < 35: # MACD heeft meer data nodig
+        return "NO DATA", 0, 0
     
-    # 2. Fix: Yahoo Finance Multi-index platstaan
-    # Dit is de reden voor de ERRORs
+    # 1. Data Cleaning (Yahoo Finance Multi-index fix)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-    
-    # Zorg dat alle kolommen hoofdletters hebben (soms geeft Yahoo 'close' ipv 'Close')
     df.columns = [str(col).capitalize() for col in df.columns]
 
     try:
-        # 3. Bereken Indicatoren
-        # We gebruiken .squeeze() om zeker te weten dat we een Series hebben
         close_series = df['Close'].squeeze()
         volume_series = df['Volume'].squeeze()
 
+        # 2. Bereken Indicatoren
         df['EMA9'] = ta.ema(close_series, length=9)
         df['EMA21'] = ta.ema(close_series, length=21)
         df['RSI'] = ta.rsi(close_series, length=14)
+        
+        # MACD Berekening (12, 26, 9)
+        macd = ta.macd(close_series, fast=12, slow=26, signal=9)
+        df['MACD_L'] = macd['MACD_12_26_9']
+        df['MACD_S'] = macd['MACDS_12_26_9']
+        
         df['AvgVol'] = ta.sma(volume_series, length=20)
 
         last = df.iloc[-1]
 
-        # 4. Score Logica
-        is_bullish = last['EMA9'] > last['EMA21']
-        is_bearish = last['EMA9'] < last['EMA21']
-        rsi_val = last['RSI']
-        
-        vol_filter = last['Volume'] > (last['AvgVol'] * 0.8)
+        # 3. GPT-5 Score Logica
+        ema_bullish = last['EMA9'] > last['EMA21']
+        macd_bullish = last['MACD_L'] > last['MACD_S']
+        rsi_bullish = last['RSI'] > 50
+        vol_ok = last['Volume'] > (last['AvgVol'] * 0.8)
 
-        if is_bullish and rsi_val > 50 and vol_filter:
-            return "STRONG BUY ✅"
-        elif is_bearish and rsi_val < 50 and vol_filter:
-            return "STRONG SELL ❌"
-        elif is_bullish:
-            return "BULLISH 📈"
-        elif is_bearish:
-            return "BEARISH 📉"
+        # 4. Bepaal Score
+        if ema_bullish and macd_bullish and rsi_bullish and vol_ok:
+            score = "STRONG BUY ✅"
+        elif not ema_bullish and not macd_bullish and not rsi_bullish and vol_ok:
+            score = "STRONG SELL ❌"
+        elif ema_bullish and macd_bullish:
+            score = "BULLISH TREND 📈"
+        elif not ema_bullish and not macd_bullish:
+            score = "BEARISH TREND 📉"
         else:
-            return "NEUTRAL ⚪"
+            score = "NEUTRAL ⚪"
+            
+        return score, last['RSI'], last['MACD_L'] - last['MACD_S']
     except Exception as e:
-        return f"CALC ERROR"
+        return "CALC ERROR", 0, 0
 
-# --- Streamlit Layout ---
-st.set_page_config(page_title="GPT-5 Analyzer", layout="wide")
-st.title("🚀 GPT-5 Stock Scanner (Fixed Version)")
+# --- Streamlit Dashboard Layout ---
+st.set_page_config(page_title="GPT-5 MACD Analyzer", layout="wide")
+st.title("📊 GPT-5 MACD & EMA Dashboard")
+st.markdown("Analysis based on **EMA 9/21 Cross**, **MACD Bullish/Bearish Histogram**, and **RSI Momentum**.")
 
-user_input = st.text_input("Enter Tickers (e.g. AAPL, NVDA, DD)", "AAPL, NVDA, DD")
+user_input = st.text_input("Enter Tickers (comma separated)", "DD, AAPL, NVDA, TSLA")
 
-if st.button("Run Market Scan"):
+if st.button("Calculate Scores"):
     tickers = [t.strip().upper() for t in user_input.split(',')]
     results = []
 
     for s in tickers:
-        with st.spinner(f"Downloading {s}..."):
+        with st.spinner(f"Analyzing {s}..."):
             try:
-                # We downloaden een extra ruime periode om gaten in data op te vangen
-                d_data = yf.download(s, period="2y", interval="1d", progress=False, auto_adjust=True)
-                h_data = yf.download(s, period="1mo", interval="1h", progress=False, auto_adjust=True)
+                # Ophalen van data
+                # We gebruiken 60 dagen voor 1h om genoeg data te hebben voor MACD
+                d_data = yf.download(s, period="1y", interval="1d", progress=False, auto_adjust=True)
+                h_data = yf.download(s, period="60d", interval="1h", progress=False, auto_adjust=True)
 
-                if not d_data.empty:
+                if not d_data.empty and not h_data.empty:
+                    score_h, rsi_h, macd_diff_h = get_gpt5_score(h_data)
+                    score_d, rsi_d, macd_diff_d = get_gpt5_score(d_data)
+
                     results.append({
                         "Ticker": s,
                         "Price": f"${d_data['Close'].iloc[-1].item():.2f}",
-                        "1H Signal": get_signal(h_data),
-                        "Daily Signal": get_signal(d_data),
-                        "RSI": f"{ta.rsi(d_data['Close'].squeeze(), length=14).iloc[-1]:.1f}"
+                        "1H Signal (MACD+EMA)": score_h,
+                        "Daily Signal (MACD+EMA)": score_d,
+                        "RSI (Daily)": f"{rsi_d:.1f}",
+                        "MACD Status": "Bullish" if macd_diff_d > 0 else "Bearish"
                     })
                 else:
-                    results.append({"Ticker": s, "1H Signal": "NOT FOUND", "Daily Signal": "NOT FOUND", "Price": "N/A", "RSI": "N/A"})
+                    results.append({"Ticker": s, "Price": "N/A", "1H Signal (MACD+EMA)": "NOT FOUND", "Daily Signal (MACD+EMA)": "NOT FOUND", "RSI (Daily)": "N/A", "MACD Status": "N/A"})
             except Exception as e:
-                st.error(f"Error with {s}: {e}")
-                results.append({"Ticker": s, "1H Signal": "ERROR", "Daily Signal": "ERROR", "Price": "N/A", "RSI": "N/A"})
+                results.append({"Ticker": s, "Price": "ERROR", "1H Signal (MACD+EMA)": "ERROR", "Daily Signal (MACD+EMA)": "ERROR", "RSI (Daily)": "N/A", "MACD Status": "N/A"})
 
     if results:
         st.dataframe(pd.DataFrame(results), use_container_width=True)
