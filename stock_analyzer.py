@@ -4,73 +4,83 @@ import pandas_ta as ta
 import pandas as pd
 
 def get_signal(df):
-    # 1. Controleer op data
+    # 1. Grondige data-check
     if df is None or df.empty or len(df) < 21:
         return "NO DATA"
     
-    # 2. Fix voor Yahoo Finance Multi-index kolommen
+    # 2. Fix: Yahoo Finance Multi-index platstaan
+    # Dit is de reden voor de ERRORs
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
+    
+    # Zorg dat alle kolommen hoofdletters hebben (soms geeft Yahoo 'close' ipv 'Close')
+    df.columns = [str(col).capitalize() for col in df.columns]
 
-    # 3. Bereken Indicatoren
-    df['EMA9'] = ta.ema(df['Close'], length=9)
-    df['EMA21'] = ta.ema(df['Close'], length=21)
-    df['RSI'] = ta.rsi(df['Close'], length=14)
-    df['AvgVol'] = ta.sma(df['Volume'], length=20)
+    try:
+        # 3. Bereken Indicatoren
+        # We gebruiken .squeeze() om zeker te weten dat we een Series hebben
+        close_series = df['Close'].squeeze()
+        volume_series = df['Volume'].squeeze()
 
-    # Pak de allerlaatste waarde
-    last = df.iloc[-1]
+        df['EMA9'] = ta.ema(close_series, length=9)
+        df['EMA21'] = ta.ema(close_series, length=21)
+        df['RSI'] = ta.rsi(close_series, length=14)
+        df['AvgVol'] = ta.sma(volume_series, length=20)
 
-    # 4. Trend Logica (in plaats van alleen Crossover)
-    # Zo zie je of het aandeel NU in een koop-zone zit
-    is_bullish_trend = last['EMA9'] > last['EMA21']
-    is_bearish_trend = last['EMA9'] < last['EMA21']
-    rsi_bullish = last['RSI'] > 50
-    rsi_bearish = last['RSI'] < 50
-    vol_filter = last['Volume'] > (last['AvgVol'] * 0.8) # Iets soepeler voor live data
+        last = df.iloc[-1]
 
-    if is_bullish_trend and rsi_bullish and vol_filter:
-        return "STRONG BUY ✅"
-    elif is_bearish_trend and rsi_bearish and vol_filter:
-        return "STRONG SELL ❌"
-    elif is_bullish_trend:
-        return "BULLISH WAIT 🟢"
-    elif is_bearish_trend:
-        return "BEARISH WAIT 🔴"
-    else:
-        return "NEUTRAL ⚪"
+        # 4. Score Logica
+        is_bullish = last['EMA9'] > last['EMA21']
+        is_bearish = last['EMA9'] < last['EMA21']
+        rsi_val = last['RSI']
+        
+        vol_filter = last['Volume'] > (last['AvgVol'] * 0.8)
 
-# --- Streamlit Interface ---
-st.set_page_config(page_title="GPT-5 Trader", layout="wide")
-st.title("📈 GPT-5 Multi-Timeframe Analyzer")
+        if is_bullish and rsi_val > 50 and vol_filter:
+            return "STRONG BUY ✅"
+        elif is_bearish and rsi_val < 50 and vol_filter:
+            return "STRONG SELL ❌"
+        elif is_bullish:
+            return "BULLISH 📈"
+        elif is_bearish:
+            return "BEARISH 📉"
+        else:
+            return "NEUTRAL ⚪"
+    except Exception as e:
+        return f"CALC ERROR"
 
-user_input = st.text_input("Enter Ticker Symbols (comma separated)", "AAPL, NVDA, TSLA, MSFT, DD")
+# --- Streamlit Layout ---
+st.set_page_config(page_title="GPT-5 Analyzer", layout="wide")
+st.title("🚀 GPT-5 Stock Scanner (Fixed Version)")
 
-if st.button("Start Market Scan"):
+user_input = st.text_input("Enter Tickers (e.g. AAPL, NVDA, DD)", "AAPL, NVDA, DD")
+
+if st.button("Run Market Scan"):
     tickers = [t.strip().upper() for t in user_input.split(',')]
-    final_results = []
+    results = []
 
     for s in tickers:
-        with st.spinner(f"Fetching {s}..."):
+        with st.spinner(f"Downloading {s}..."):
             try:
-                # Download data (auto_adjust zorgt voor schone Close prijzen)
-                d1 = yf.download(s, period="1y", interval="1d", progress=False, auto_adjust=True)
-                h1 = yf.download(s, period="1mo", interval="1h", progress=False, auto_adjust=True)
-                
-                if not d1.empty and not h1.empty:
-                    final_results.append({
-                        "Symbol": s,
-                        "Price": f"${d1['Close'].iloc[-1]:.2f}",
-                        "1H Signal": get_signal(h1),
-                        "Daily Signal": get_signal(d1),
-                        "RSI (D)": f"{ta.rsi(d1['Close'], length=14).iloc[-1]:.1f}"
+                # We downloaden een extra ruime periode om gaten in data op te vangen
+                d_data = yf.download(s, period="2y", interval="1d", progress=False, auto_adjust=True)
+                h_data = yf.download(s, period="1mo", interval="1h", progress=False, auto_adjust=True)
+
+                if not d_data.empty:
+                    results.append({
+                        "Ticker": s,
+                        "Price": f"${d_data['Close'].iloc[-1].item():.2f}",
+                        "1H Signal": get_signal(h_data),
+                        "Daily Signal": get_signal(d_data),
+                        "RSI": f"{ta.rsi(d_data['Close'].squeeze(), length=14).iloc[-1]:.1f}"
                     })
                 else:
-                    final_results.append({"Symbol": s, "1H Signal": "NOT FOUND", "Daily Signal": "NOT FOUND"})
+                    results.append({"Ticker": s, "1H Signal": "NOT FOUND", "Daily Signal": "NOT FOUND", "Price": "N/A", "RSI": "N/A"})
             except Exception as e:
-                final_results.append({"Symbol": s, "1H Signal": "ERROR", "Daily Signal": "ERROR"})
+                st.error(f"Error with {s}: {e}")
+                results.append({"Ticker": s, "1H Signal": "ERROR", "Daily Signal": "ERROR", "Price": "N/A", "RSI": "N/A"})
 
-    # Resultaten tonen
-    if final_results:
-        st.table(pd.DataFrame(final_results))
+    if results:
+        st.dataframe(pd.DataFrame(results), use_container_width=True)
+
 
