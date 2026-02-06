@@ -5,93 +5,92 @@ import numpy as np
 
 def calculate_indicators(df, is_1h=False):
     try:
-        # Data Cleaning
+        # Data opschonen
         close_prices = df['Close'].values.flatten()
         high_prices = df['High'].values.flatten()
         low_prices = df['Low'].values.flatten()
         
         if len(close_prices) < 35:
-            return "INSUFFICIENT DATA", 0
+            return "DATA TE KORT", 0
 
-        # --- MACD (Voor Trend) ---
+        # --- MACD ---
         series = pd.Series(close_prices)
         exp1 = series.ewm(span=12, adjust=False).mean()
         exp2 = series.ewm(span=26, adjust=False).mean()
         macd_line = exp1 - exp2
-        signal_line = macd_line.ewm(span=9, adjust=False).mean()
         
         last_macd = macd_line.iloc[-1]
         prev_macd = macd_line.iloc[-2]
-        macd_bullish = last_macd > signal_line.iloc[-1]
         macd_stijgend = last_macd > prev_macd
 
         # --- STOCHASTIC (14, 3, 3) ---
         low_14 = pd.Series(low_prices).rolling(window=14).min()
         high_14 = pd.Series(high_prices).rolling(window=14).max()
         
-        # %K Basis (zonder deling door nul fouten)
+        # %K berekening
         k_raw = 100 * ((pd.Series(close_prices) - low_14) / (high_14 - low_14 + 0.00001))
-        # %K 3-period smoothing
         k_line = k_raw.rolling(window=3).mean()
         
-        curr_k = k_line.iloc[-1]
-        prev_k = k_line.iloc[-2]
+        curr_k = round(float(k_line.iloc[-1]), 2)
+        prev_k = round(float(k_line.iloc[-2]), 2)
 
-        # --- JOUW SPECIFIEKE LOGICA ---
-        # 1H criteria: %K > 80 en stijgend
-        stoch_buy = (curr_k > 80) and (curr_k > prev_k)
+        # Logica: %K > 80 en stijgend
+        stoch_is_hot = (curr_k > 80) and (curr_k > prev_k)
 
         if is_1h:
-            if stoch_buy:
-                # Als Stoch super sterk is, geven we de BUY, 
-                # we gebruiken MACD alleen als extra bevestiging in de tekst
-                status = "STRONG BUY ✅" if macd_stijgend else "MOMENTUM BUY 🚀"
-                return status, round(curr_k, 2)
-            elif curr_k < 20 and curr_k < prev_k:
-                return "STRONG SELL ❌", round(curr_k, 2)
+            if stoch_is_hot:
+                return "STRONG BUY ✅", curr_k
+            elif curr_k < 20:
+                return "OVERSOLD ❌", curr_k
             else:
-                return "NEUTRAL ⚪", round(curr_k, 2)
+                return "NEUTRAAL ⚪", curr_k
         else:
-            # Daily blijft op de hoofdtrend (MACD)
-            return "BULLISH 📈" if macd_bullish else "BEARISH 📉", round(curr_k, 2)
+            # Daily Trend
+            macd_bull = last_macd > (macd_line.ewm(span=9).mean().iloc[-1])
+            return "BULLISH 📈" if macd_bull else "BEARISH 📉", curr_k
             
     except Exception as e:
-        return f"ERROR", 0
+        return "ERROR", 0
 
-# --- Streamlit Interface ---
-st.set_page_config(page_title="GPT-5 Precise Scanner", layout="wide")
-st.title("📈 GPT-5 Precise Momentum Tracker")
+# --- Streamlit UI ---
+st.set_page_config(page_title="GPT-5 Stoch Tracker", layout="wide")
+st.title("🚀 GPT-5 Momentum Scanner")
 
-user_input = st.text_input("Tickers (bijv. LUMN, AAPL, NVDA, DD)", "LUMN, AAPL, NVDA, DD")
+tickers_input = st.text_input("Voer tickers in:", "LUMN, AAPL, NVDA, TSLA, DD")
 
-if st.button("Analyseer Momentum"):
-    tickers = [t.strip().upper() for t in user_input.split(',')]
-    results = []
+if st.button("Scan Markt"):
+    tickers = [t.strip().upper() for t in tickers_input.split(',')]
+    data_list = []
 
     for s in tickers:
-        with st.spinner(f"Scannen van {s}..."):
-            try:
-                # Ophalen data (auto_adjust=True voor zuivere prijzen)
-                d_data = yf.download(s, period="1y", interval="1d", progress=False, auto_adjust=True)
-                h_data = yf.download(s, period="60d", interval="1h", progress=False, auto_adjust=True)
+        try:
+            d_data = yf.download(s, period="1y", interval="1d", progress=False, auto_adjust=True)
+            h_data = yf.download(s, period="60d", interval="1h", progress=False, auto_adjust=True)
 
-                if not d_data.empty and not h_data.empty:
-                    score_1h, k_1h = calculate_indicators(h_data, is_1h=True)
-                    score_d, _ = calculate_indicators(d_data, is_1h=False)
+            if not d_data.empty and not h_data.empty:
+                score_1h, k_val_1h = calculate_indicators(h_data, is_1h=True)
+                score_d, _ = calculate_indicators(d_data, is_1h=False)
 
-                    results.append({
-                        "Ticker": s,
-                        "Prijs": f"${d_data['Close'].values.flatten()[-1]:.2f}",
-                        "1H Score (Stoch Focus)": score_1h,
-                        "1H Stoch %K": k_1h,
-                        "Daily Trend (MACD)": score_d
-                    })
-            except:
-                results.append({"Ticker": s, "1H Score (Stoch Focus)": "ERR"})
+                data_list.append({
+                    "Ticker": s,
+                    "Prijs": round(d_data['Close'].iloc[-1], 2),
+                    "1H Signaal": score_1h,
+                    "Stoch %K (1H)": k_val_1h,
+                    "Dag Trend": score_d
+                })
+        except:
+            continue
 
-    if results:
-        # Tabel weergeven
-        st.dataframe(pd.DataFrame(results), use_container_width=True)
+    if data_list:
+        df = pd.DataFrame(data_list)
+        
+        # Styling toevoegen: Kleur de Stoch kolom als aan de eisen voldaan wordt
+        def highlight_stoch(val):
+            color = 'background-color: #00ff00; color: black' if val > 80 else ''
+            return color
+
+        st.table(df) # We gebruiken st.table voor maximale zichtbaarheid van alle kolommen
+
 
 
 
